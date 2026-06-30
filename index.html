@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bidirectional Rich Text Sync Across Iframes</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <div class="host-container">
+        <!-- Host Header Section -->
+        <header class="glass-panel host-header">
+            <div class="header-title-section">
+                <h1>
+                    <svg viewBox="0 0 24 24" width="24" height="24" stroke="var(--accent-cyan)" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" style="filter: drop-shadow(0 0 5px var(--accent-cyan-glow))"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
+                    Iframe Sync Broker
+                </h1>
+                <p>Bidirectional real-time rich text sync with cursor preservation and undo/redo</p>
+            </div>
+            
+            <div class="status-badge-container">
+                <div class="stat-chip">Total Syncs: <span id="stat-total">0</span></div>
+                <div class="stat-chip" title="Text entry events">Inputs: <span id="stat-inputs">0</span></div>
+                <div class="stat-chip" title="Format commands">Formats: <span id="stat-formats">0</span></div>
+                <div class="stat-chip" title="Undo/Redo occurrences">History: <span id="stat-history">0</span></div>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="workspace-grid">
+            
+            <!-- Editor Frame A wrapper -->
+            <div id="wrapper-frame-a" class="iframe-wrapper frame-a-wrapper glass-panel">
+                <div class="frame-label">
+                    <span>Frame A (Violet Core)</span>
+                    <span style="font-size: 0.7rem; opacity: 0.8;">id: frame-a</span>
+                </div>
+                <iframe id="iframe-a" src="editor.html?id=frame-a"></iframe>
+            </div>
+
+            <!-- Central Visual Bridge Hub -->
+            <div class="sync-bridge-container">
+                <div id="sync-hub" class="sync-badge" title="Synchronization Activity Broker">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m16 3 4 4-4 4"></path><path d="M20 7H9a4 4 0 0 0-4 4v9"></path><path d="m8 21-4-4 4-4"></path><path d="M4 17h11a4 4 0 0 0 4-4V4"></path></svg>
+                    <div class="sync-ripple"></div>
+                </div>
+            </div>
+
+            <!-- Editor Frame B wrapper -->
+            <div id="wrapper-frame-b" class="iframe-wrapper frame-b-wrapper glass-panel">
+                <div class="frame-label">
+                    <span>Frame B (Cyan Core)</span>
+                    <span style="font-size: 0.7rem; opacity: 0.8;">id: frame-b</span>
+                </div>
+                <iframe id="iframe-b" src="editor.html?id=frame-b"></iframe>
+            </div>
+
+        </main>
+
+        <!-- Action Log Terminal Panel -->
+        <section class="glass-panel log-panel">
+            <div class="log-header">
+                <div class="log-title">postMessage Transaction Log</div>
+                
+                <div class="log-actions">
+                    <!-- Filters -->
+                    <label class="toggle-container" title="Filter log categories">
+                        <input type="checkbox" id="filter-input-sync" checked>
+                        <span>Inputs</span>
+                    </label>
+                    <label class="toggle-container" title="Filter format categories">
+                        <input type="checkbox" id="filter-format-sync" checked>
+                        <span>Formats</span>
+                    </label>
+                    <label class="toggle-container" title="Filter undo/redo actions">
+                        <input type="checkbox" id="filter-undo-sync" checked>
+                        <span>History</span>
+                    </label>
+                    
+                    <div style="width: 1px; height: 16px; background: var(--border-color); margin: 0 4px;"></div>
+                    
+                    <label class="toggle-container">
+                        <input type="checkbox" id="log-autoscroll" checked>
+                        <span>Auto-Scroll</span>
+                    </label>
+                    <button id="btn-clear-logs" class="log-btn">
+                        <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                        Clear Log
+                    </button>
+                </div>
+            </div>
+            
+            <div id="log-console" class="log-console">
+                <div id="log-placeholder" class="log-placeholder">
+                    Listening for postMessage events... Perform actions in either frame above.
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const iframeA = document.getElementById('iframe-a');
+        const iframeB = document.getElementById('iframe-b');
+        const wrapperA = document.getElementById('wrapper-frame-a');
+        const wrapperB = document.getElementById('wrapper-frame-b');
+        const syncHub = document.getElementById('sync-hub');
+        
+        const logConsole = document.getElementById('log-console');
+        const logPlaceholder = document.getElementById('log-placeholder');
+        const btnClearLogs = document.getElementById('btn-clear-logs');
+        
+        const logAutoscroll = document.getElementById('log-autoscroll');
+        const filterInputSync = document.getElementById('filter-input-sync');
+        const filterFormatSync = document.getElementById('filter-format-sync');
+        const filterUndoSync = document.getElementById('filter-undo-sync');
+
+        // Stat targets
+        const statTotal = document.getElementById('stat-total');
+        const statInputs = document.getElementById('stat-inputs');
+        const statFormats = document.getElementById('stat-formats');
+        const statHistory = document.getElementById('stat-history');
+
+        let totals = { total: 0, inputs: 0, formats: 0, history: 0 };
+
+        // Clear action logs
+        btnClearLogs.addEventListener('click', () => {
+            // Remove all log rows
+            const rows = logConsole.querySelectorAll('.log-row');
+            rows.forEach(r => r.remove());
+            logPlaceholder.style.display = 'flex';
+        });
+
+        // Listen for postMessages
+        window.addEventListener('message', (event) => {
+            // Origin validation (bypass if local file:// origin is 'null')
+            if (window.location.protocol !== 'file:' && window.location.origin !== 'null' && event.origin !== window.location.origin) {
+                console.warn('Blocked message from external origin:', event.origin);
+                return;
+            }
+
+            const payload = event.data;
+            if (!payload || !payload.source || !payload.type) return;
+
+            // Route target identification
+            const sourceId = payload.source;
+            const targetId = sourceId === 'frame-a' ? 'frame-b' : 'frame-a';
+            const targetIframe = sourceId === 'frame-a' ? iframeB : iframeA;
+            const targetWrapper = sourceId === 'frame-a' ? wrapperB : wrapperA;
+
+            // Update stats counter
+            updateStats(payload.type);
+
+            // Log event in terminal
+            appendLog(payload, sourceId, targetId);
+
+            // Pulse visual indicator at the sync hub
+            pulseSyncHub(sourceId);
+
+            // Forward message to the target iframe
+            // Change payload type to RECEIVE_SYNC so destination applies it correctly
+            const relayPayload = {
+                ...payload,
+                type: 'RECEIVE_SYNC'
+            };
+            
+            if (targetIframe.contentWindow) {
+                const targetOrigin = window.location.origin === 'null' ? '*' : window.location.origin;
+                targetIframe.contentWindow.postMessage(relayPayload, targetOrigin);
+            }
+        });
+
+        function updateStats(type) {
+            totals.total++;
+            statTotal.textContent = totals.total;
+
+            if (type === 'INPUT_SYNC') {
+                totals.inputs++;
+                statInputs.textContent = totals.inputs;
+            } else if (type === 'FORMAT_SYNC') {
+                totals.formats++;
+                statFormats.textContent = totals.formats;
+            } else if (type === 'UNDO_REDO_SYNC') {
+                totals.history++;
+                statHistory.textContent = totals.history;
+            }
+        }
+
+        function pulseSyncHub(sourceId) {
+            // Determine direction class
+            const directionClass = sourceId === 'frame-a' ? 'sync-routing-left-to-right' : 'sync-routing-right-to-left';
+            
+            syncHub.classList.remove('sync-routing-left-to-right', 'sync-routing-right-to-left');
+            void syncHub.offsetWidth; // trigger reflow
+            syncHub.classList.add(directionClass);
+
+            // Clear class after animation runs
+            setTimeout(() => {
+                syncHub.classList.remove(directionClass);
+            }, 800);
+        }
+
+        // Custom Syntax Highlighting for Logging JSON
+        function syntaxHighlightJson(json) {
+            if (typeof json !== 'string') {
+                json = JSON.stringify(json, null, 2);
+            }
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g, function (match) {
+                let cls = 'number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'key';
+                    } else {
+                        cls = 'string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'null';
+                }
+                
+                if (cls === 'key') {
+                    return '<span class="json-key">' + match.replace(/:$/, '') + '</span>:';
+                } else {
+                    return '<span class="json-val-' + cls + '">' + match + '</span>';
+                }
+            });
+        }
+
+        function appendLog(payload, sourceId, targetId) {
+            // Check filters
+            let isVisible = true;
+            if (payload.type === 'INPUT_SYNC' && !filterInputSync.checked) isVisible = false;
+            if (payload.type === 'FORMAT_SYNC' && !filterFormatSync.checked) isVisible = false;
+            if (payload.type === 'UNDO_REDO_SYNC' && !filterUndoSync.checked) isVisible = false;
+
+            // Formulate timestamp
+            const now = new Date();
+            const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+
+            // Formulate human type badge
+            let typeLabel = payload.type;
+            let typeClass = 'input-sync';
+            if (payload.type === 'FORMAT_SYNC') {
+                typeLabel = 'FORMAT:' + payload.action.toUpperCase();
+                typeClass = 'format-sync';
+            } else if (payload.type === 'UNDO_REDO_SYNC') {
+                typeLabel = 'HISTORY:' + payload.action.toUpperCase();
+                typeClass = 'undo-redo';
+            }
+
+            // Create row element
+            const logRow = document.createElement('div');
+            logRow.className = `log-row`;
+            logRow.dataset.type = payload.type; // for live filtering show/hide
+            if (!isVisible) {
+                logRow.style.display = 'none';
+            }
+
+            // Extract content preview for clean JSON display
+            const logData = {
+                type: payload.type,
+                action: payload.action || undefined,
+                selection: payload.selection,
+                htmlLength: payload.html ? payload.html.length : 0,
+                htmlPreview: payload.html ? (payload.html.length > 40 ? payload.html.substring(0, 40) + '...' : payload.html) : ''
+            };
+
+            const sourceName = sourceId === 'frame-a' ? 'Frame A' : 'Frame B';
+            const targetName = targetId === 'frame-a' ? 'Frame A' : 'Frame B';
+            const sourceColorClass = sourceId === 'frame-a' ? 'frame-a' : 'frame-b';
+            const targetColorClass = targetId === 'frame-a' ? 'frame-a' : 'frame-b';
+
+            logRow.innerHTML = `
+                <div class="log-meta">
+                    <span class="log-time">[${timeStr}]</span>
+                    <span class="log-type ${typeClass}">${typeLabel}</span>
+                    <span class="log-direction">
+                        <span class="log-source ${sourceColorClass}">${sourceName}</span>
+                        ➔
+                        <span class="log-source ${targetColorClass}">${targetName}</span>
+                    </span>
+                </div>
+                <code class="log-body">${syntaxHighlightJson(logData)}</code>
+            `;
+
+            // Hide placeholder
+            logPlaceholder.style.display = 'none';
+
+            // Append
+            logConsole.appendChild(logRow);
+
+            // Autoscroll
+            if (logAutoscroll.checked) {
+                logConsole.scrollTop = logConsole.scrollHeight;
+            }
+        }
+
+        // Live filter toggle listeners
+        function updateFilterView() {
+            const rows = logConsole.querySelectorAll('.log-row');
+            rows.forEach(row => {
+                const type = row.dataset.type;
+                let visible = true;
+                if (type === 'INPUT_SYNC' && !filterInputSync.checked) visible = false;
+                if (type === 'FORMAT_SYNC' && !filterFormatSync.checked) visible = false;
+                if (type === 'UNDO_REDO_SYNC' && !filterUndoSync.checked) visible = false;
+                
+                row.style.display = visible ? 'block' : 'none';
+            });
+        }
+
+        filterInputSync.addEventListener('change', updateFilterView);
+        filterFormatSync.addEventListener('change', updateFilterView);
+        filterUndoSync.addEventListener('change', updateFilterView);
+    </script>
+</body>
+</html>

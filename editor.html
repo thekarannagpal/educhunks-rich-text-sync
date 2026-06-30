@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rich Text Editor Frame</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="editor-body">
+
+    <div class="editor-toolbar">
+        <div class="toolbar-group">
+            <button id="btn-bold" class="toolbar-btn" title="Bold (Ctrl+B)">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"></path><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"></path></svg>
+            </button>
+            <button id="btn-italic" class="toolbar-btn" title="Italic (Ctrl+I)">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="4" x2="10" y2="4"></line><line x1="14" y1="20" x2="5" y2="20"></line><line x1="15" y1="4" x2="9" y2="20"></line></svg>
+            </button>
+            <button id="btn-strike" class="toolbar-btn" title="Strikethrough">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><path d="M16 4H9a4 4 0 0 0-4 4 4 4 0 0 0 4 4h6a4 4 0 0 1 4 4 4 4 0 0 1-4 4H7"></path></svg>
+            </button>
+            
+            <div style="width: 1px; height: 20px; background: var(--border-color); margin: 0 4px;"></div>
+            
+            <button id="btn-undo" class="toolbar-btn" title="Undo (Ctrl+Z)">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"></path><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path></svg>
+            </button>
+            <button id="btn-redo" class="toolbar-btn" title="Redo (Ctrl+Y)">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"></path><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"></path></svg>
+            </button>
+        </div>
+        
+        <div class="editor-status-indicator">
+            <span id="status-dot" class="editor-status-dot"></span>
+            <span id="status-text">Connected</span>
+        </div>
+    </div>
+
+    <div id="canvas-container" class="editor-canvas-container">
+        <div id="editor" class="editor-canvas" contenteditable="true" spellcheck="false" placeholder="Start typing here..."></div>
+    </div>
+
+    <script>
+        // Setup identifiers
+        const urlParams = new URLSearchParams(window.location.search);
+        const frameId = urlParams.get('id') || 'frame-unknown';
+        
+        // Add framing theme
+        if (frameId === 'frame-a') {
+            document.body.classList.add('frame-a-theme');
+        } else if (frameId === 'frame-b') {
+            document.body.classList.add('frame-b-theme');
+        }
+
+        const editor = document.getElementById('editor');
+        const container = document.getElementById('canvas-container');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        
+        const btnBold = document.getElementById('btn-bold');
+        const btnItalic = document.getElementById('btn-italic');
+        const btnStrike = document.getElementById('btn-strike');
+        const btnUndo = document.getElementById('btn-undo');
+        const btnRedo = document.getElementById('btn-redo');
+
+        // History undo/redo state stack
+        const undoStack = [];
+        const redoStack = [];
+        const maxHistory = 100;
+        let isSyncing = false; // prevents infinite sync loop triggers
+
+        // Sync and save history triggers
+        let debounceSyncTimeout = null;
+        let typingHistoryTimeout = null;
+
+        // Initialize state on load
+        window.addEventListener('load', () => {
+            saveState(true); // initial blank state
+            updateUndoRedoButtons();
+            
+            // Set initial focus
+            if (frameId === 'frame-a') {
+                editor.focus();
+            }
+        });
+
+        // Setup format toolbar handlers
+        btnBold.addEventListener('click', () => applyFormat('bold'));
+        btnItalic.addEventListener('click', () => applyFormat('italic'));
+        btnStrike.addEventListener('click', () => applyFormat('strikeThrough'));
+        
+        btnUndo.addEventListener('click', () => triggerUndo());
+        btnRedo.addEventListener('click', () => triggerRedo());
+
+        // Setup mousedown preventDefault to avoid losing editor focus/selection
+        const toolbarButtons = [btnBold, btnItalic, btnStrike, btnUndo, btnRedo];
+        toolbarButtons.forEach(btn => {
+            btn.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+            });
+        });
+
+        function applyFormat(action) {
+            document.execCommand(action, false, null);
+            saveState();
+            broadcastSync('FORMAT_SYNC', action);
+            updateToolbarStates();
+            editor.focus();
+        }
+
+        // Selection queries for active buttons
+        function updateToolbarStates() {
+            btnBold.classList.toggle('active', document.queryCommandState('bold'));
+            btnItalic.classList.toggle('active', document.queryCommandState('italic'));
+            btnStrike.classList.toggle('active', document.queryCommandState('strikeThrough'));
+        }
+
+        document.addEventListener('selectionchange', () => {
+            if (document.activeElement === editor) {
+                updateToolbarStates();
+            }
+        });
+
+        // Listen for typing input
+        editor.addEventListener('input', (e) => {
+            if (isSyncing) return;
+
+            // Real-time synchronization (debounced by 50ms to compress rapid typed strokes)
+            if (debounceSyncTimeout) clearTimeout(debounceSyncTimeout);
+            debounceSyncTimeout = setTimeout(() => {
+                broadcastSync('INPUT_SYNC');
+            }, 50);
+
+            // History management (save undo state when user stops typing for 500ms, or spaces/enters are inserted)
+            if (typingHistoryTimeout) clearTimeout(typingHistoryTimeout);
+            
+            const isWordBoundary = (e.inputType === 'insertText' && (e.data === ' ' || e.data === '.' || e.data === ',')) 
+                                  || e.inputType === 'insertParagraph';
+            
+            if (isWordBoundary) {
+                saveState();
+            } else {
+                typingHistoryTimeout = setTimeout(() => {
+                    saveState();
+                }, 500);
+            }
+        });
+
+        // Intercept native keyboard shortcuts for precise control
+        editor.addEventListener('keydown', (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                if (e.key === 'b') {
+                    e.preventDefault();
+                    applyFormat('bold');
+                } else if (e.key === 'i') {
+                    e.preventDefault();
+                    applyFormat('italic');
+                } else if (e.key === 'z') {
+                    e.preventDefault();
+                    triggerUndo();
+                } else if (e.key === 'y' || (e.shiftKey && e.key === 'z')) {
+                    e.preventDefault();
+                    triggerRedo();
+                }
+            }
+        });
+
+        // Broadcast to Host Broker
+        function broadcastSync(type, action = '') {
+            if (isSyncing) return;
+            const html = editor.innerHTML;
+            const selection = getSelectionCharacterOffsetWithin(editor);
+            
+            const payload = {
+                type: type,
+                action: action,
+                html: html,
+                selection: selection,
+                source: frameId
+            };
+            
+            // Post message back to parent broker with target origin validation
+            const targetOrigin = (window.location.protocol === 'file:' || window.location.origin === 'null') ? '*' : window.location.origin;
+            window.parent.postMessage(payload, targetOrigin);
+        }
+
+        // Receive Message Broker Dispatch
+        window.addEventListener('message', (event) => {
+            // Origin validation
+            if (window.location.protocol !== 'file:' && window.location.origin !== 'null' && event.origin !== window.location.origin) {
+                console.warn('Blocked postMessage from external origin:', event.origin);
+                return;
+            }
+
+            const payload = event.data;
+            if (!payload || payload.source === frameId) return;
+
+            if (payload.type === 'RECEIVE_SYNC') {
+                applyReceivedSync(payload);
+            }
+        });
+
+        // Apply incoming synchronization
+        function applyReceivedSync(payload) {
+            if (editor.innerHTML === payload.html) {
+                return; // already synced
+            }
+
+            isSyncing = true;
+            try {
+                const hasFocus = (document.activeElement === editor);
+                let savedSel = null;
+                if (hasFocus) {
+                    savedSel = getSelectionCharacterOffsetWithin(editor);
+                }
+
+                // Update HTML
+                editor.innerHTML = payload.html;
+
+                // Save state to undo history
+                pushToUndoStack({
+                    html: payload.html,
+                    selection: hasFocus ? savedSel : payload.selection
+                });
+
+                // Restore selection
+                if (hasFocus) {
+                    restoreSelection(editor, savedSel);
+                }
+
+                // UI feedback
+                flashEditorSync();
+                updateToolbarStates();
+            } catch (err) {
+                console.error('Error applying sync:', err);
+            } finally {
+                isSyncing = false;
+            }
+        }
+
+        // Custom History Manager Mechanics
+        function saveState(force = false) {
+            const currentState = {
+                html: editor.innerHTML,
+                selection: getSelectionCharacterOffsetWithin(editor)
+            };
+
+            const lastState = undoStack[undoStack.length - 1];
+            if (force || !lastState || lastState.html !== currentState.html) {
+                undoStack.push(currentState);
+                if (undoStack.length > maxHistory) {
+                    undoStack.shift();
+                }
+                redoStack.length = 0; // Clear redo
+                updateUndoRedoButtons();
+            }
+        }
+
+        function pushToUndoStack(state) {
+            const lastState = undoStack[undoStack.length - 1];
+            if (!lastState || lastState.html !== state.html) {
+                undoStack.push(state);
+                if (undoStack.length > maxHistory) {
+                    undoStack.shift();
+                }
+                redoStack.length = 0;
+                updateUndoRedoButtons();
+            }
+        }
+
+        function triggerUndo() {
+            if (undoStack.length > 1) {
+                // The top is the current state, pop it to redo
+                const currentState = undoStack.pop();
+                redoStack.push(currentState);
+                
+                // Get the state before that
+                const prevState = undoStack[undoStack.length - 1];
+                
+                isSyncing = true;
+                try {
+                    editor.innerHTML = prevState.html;
+                    
+                    // Focus and restore
+                    editor.focus();
+                    restoreSelection(editor, prevState.selection);
+                } finally {
+                    isSyncing = false;
+                }
+
+                updateUndoRedoButtons();
+                updateToolbarStates();
+                broadcastSync('UNDO_REDO_SYNC', 'undo');
+                flashEditorSync();
+            }
+        }
+
+        function triggerRedo() {
+            if (redoStack.length > 0) {
+                const nextState = redoStack.pop();
+                undoStack.push(nextState);
+                
+                isSyncing = true;
+                try {
+                    editor.innerHTML = nextState.html;
+                    
+                    editor.focus();
+                    restoreSelection(editor, nextState.selection);
+                } finally {
+                    isSyncing = false;
+                }
+
+                updateUndoRedoButtons();
+                updateToolbarStates();
+                broadcastSync('UNDO_REDO_SYNC', 'redo');
+                flashEditorSync();
+            }
+        }
+
+        function updateUndoRedoButtons() {
+            btnUndo.disabled = (undoStack.length <= 1);
+            btnRedo.disabled = (redoStack.length === 0);
+        }
+
+        function flashEditorSync() {
+            container.classList.remove('flash-sync');
+            void container.offsetWidth; // trigger reflow
+            container.classList.add('flash-sync');
+
+            statusDot.classList.add('syncing');
+            statusText.textContent = 'Syncing...';
+
+            setTimeout(() => {
+                statusDot.classList.remove('syncing');
+                statusText.textContent = 'Connected';
+            }, 600);
+        }
+
+        // Selection Preservation utilities
+        function getSelectionCharacterOffsetWithin(element) {
+            let start = 0, end = 0;
+            const doc = element.ownerDocument || element.document;
+            const win = doc.defaultView || doc.parentWindow;
+            const sel = win.getSelection();
+            
+            if (sel.rangeCount > 0) {
+                const range = sel.getRangeAt(0);
+                const preCaretRange = range.cloneRange();
+                preCaretRange.selectNodeContents(element);
+                preCaretRange.setEnd(range.startContainer, range.startOffset);
+                start = preCaretRange.toString().length;
+                
+                preCaretRange.setEnd(range.endContainer, range.endOffset);
+                end = preCaretRange.toString().length;
+            }
+            return { start, end };
+        }
+
+        function getTextNodesIn(node) {
+            const textNodes = [];
+            if (node.nodeType === Node.TEXT_NODE) {
+                textNodes.push(node);
+            } else {
+                const children = node.childNodes;
+                for (let i = 0; i < children.length; i++) {
+                    textNodes.push(...getTextNodesIn(children[i]));
+                }
+            }
+            return textNodes;
+        }
+
+        function restoreSelection(element, savedSel) {
+            if (!savedSel) return;
+            const doc = element.ownerDocument || element.document;
+            const win = doc.defaultView || doc.parentWindow;
+            const range = doc.createRange();
+            range.selectNodeContents(element);
+            
+            const textNodes = getTextNodesIn(element);
+            let charCount = 0;
+            let startNode = null, startOffset = 0;
+            let endNode = null, endOffset = 0;
+            
+            const start = savedSel.start;
+            const end = savedSel.end;
+
+            for (let i = 0; i < textNodes.length; i++) {
+                const node = textNodes[i];
+                const nextCharCount = charCount + node.length;
+                
+                if (!startNode && start >= charCount && start <= nextCharCount) {
+                    startNode = node;
+                    startOffset = start - charCount;
+                }
+                if (!endNode && end >= charCount && end <= nextCharCount) {
+                    endNode = node;
+                    endOffset = end - charCount;
+                }
+                charCount = nextCharCount;
+            }
+            
+            // Fallback for end of text or empty containers
+            if (!startNode && textNodes.length > 0) {
+                startNode = textNodes[textNodes.length - 1];
+                startOffset = startNode.length;
+            }
+            if (!endNode && textNodes.length > 0) {
+                endNode = textNodes[textNodes.length - 1];
+                endOffset = endNode.length;
+            }
+
+            if (startNode && endNode) {
+                range.setStart(startNode, startOffset);
+                range.setEnd(endNode, endOffset);
+                const sel = win.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+            } else if (textNodes.length === 0) {
+                // If there are no text nodes (empty editor), place cursor at index 0
+                range.setStart(element, 0);
+                range.setEnd(element, 0);
+                const sel = win.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+            }
+        }
+    </script>
+</body>
+</html>
